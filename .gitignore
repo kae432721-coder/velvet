@@ -1,0 +1,6 @@
+venv/
+__pycache__/
+*.pyc
+velvet.db
+*.log
+.DS_Store
