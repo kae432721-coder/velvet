@@ -203,22 +203,35 @@ async def resolve_stream_url(track_id: str) -> str:
         vid = track_id.replace("ytm_", "", 1)
 
         def extract():
-            clients = [["android_vr"], ["ios"], ["tv_embedded"], ["web"]]
+            clients = [None, ["tv"], ["web_safari"], ["ios"], ["android_vr"]]
             last_err = None
             for client in clients:
                 ydl_opts = {
-                    "format": "bestaudio/best",
+                    "format": "bestaudio[ext=m4a]/bestaudio/best",
                     "quiet": True,
                     "no_warnings": True,
                     "socket_timeout": 12,
                     "retries": 2,
-                    "extractor_args": {"youtube": {"player_client": client}},
                 }
+                if client:
+                    ydl_opts["extractor_args"] = {"youtube": {"player_client": client}}
                 try:
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         info = ydl.extract_info(f"https://music.youtube.com/watch?v={vid}", download=False)
-                        if info and info.get("url"):
-                            return info["url"]
+                        url = info.get("url") if info else None
+                        if not url:
+                            continue
+                        hdrs = dict(info.get("http_headers") or {"User-Agent": "Mozilla/5.0"})
+                        # Verify the CDN actually allows streaming this URL (not 403)
+                        test_hdrs = {**hdrs, "Range": "bytes=0-1"}
+                        with httpx.Client(follow_redirects=True, timeout=6.0) as probe:
+                            pr = probe.get(url, headers=test_hdrs)
+                            if pr.status_code in (200, 206):
+                                if not hasattr(resolve_stream_url, "headers"):
+                                    resolve_stream_url.headers = {}
+                                resolve_stream_url.headers[url] = hdrs
+                                return url
+                            last_err = f"{client or 'default'} returned HTTP {pr.status_code}"
                 except Exception as e:
                     last_err = e
             raise HTTPException(status_code=502, detail=f"Stream unavailable: {last_err}")
@@ -235,7 +248,7 @@ async def stream_track(track_id: str, request: Request):
         return FileResponse(local_path, headers={"Cache-Control": "no-store"})
 
     url = await resolve_stream_url(track_id)
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = dict(getattr(resolve_stream_url, "headers", {}).get(url, {"User-Agent": "Mozilla/5.0"}))
     if "range" in request.headers:
         headers["Range"] = request.headers["range"]
 
