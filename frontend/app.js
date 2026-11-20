@@ -988,9 +988,9 @@ document.getElementById("scanLocalBtn")?.addEventListener("click", async () => {
 });
 
 // --- PART 4: DOCUMENT PICTURE-IN-PICTURE MINI PLAYER ---
-let pipWindow = null;
-let pipMode = "art";
-let pipLastLyricIdx = -1;
+var pipWindow = null;
+var pipMode = "art";
+var pipLastLyricIdx = -1;
 
 const PIP_ICONS = {
   play: `<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20 6 4"/></svg>`,
