@@ -1,4 +1,4 @@
-import hashlib
+﻿import hashlib
 import asyncio
 import re
 import sqlite3
@@ -201,12 +201,27 @@ async def resolve_stream_url(track_id: str) -> str:
 
     if track_id.startswith("ytm_"):
         vid = track_id.replace("ytm_", "", 1)
-        ydl_opts = {"format": "bestaudio/best", "quiet": True, "no_warnings": True}
 
         def extract():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(f"https://music.youtube.com/watch?v={vid}", download=False)
-                return info["url"]
+            clients = [["android_vr"], ["ios"], ["tv_embedded"], ["web"]]
+            last_err = None
+            for client in clients:
+                ydl_opts = {
+                    "format": "bestaudio/best",
+                    "quiet": True,
+                    "no_warnings": True,
+                    "socket_timeout": 12,
+                    "retries": 2,
+                    "extractor_args": {"youtube": {"player_client": client}},
+                }
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(f"https://music.youtube.com/watch?v={vid}", download=False)
+                        if info and info.get("url"):
+                            return info["url"]
+                except Exception as e:
+                    last_err = e
+            raise HTTPException(status_code=502, detail=f"Stream unavailable: {last_err}")
 
         return await asyncio.to_thread(extract)
 
@@ -340,23 +355,26 @@ def list_downloads():
 
 @app.get("/api/lyrics")
 async def get_lyrics(title: str, artist: str = ""):
-    async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.get(
-            "https://lrclib.net/api/search",
-            params={"track_name": title, "artist_name": artist},
-            headers={"User-Agent": "VelvetLocalPlayer/1.0"},
-        )
-        if r.status_code == 200:
-            items = r.json()
-            for item in items:
-                if item.get("syncedLyrics"):
-                    return {
-                        "synced": True,
-                        "lyrics": item["syncedLyrics"],
-                        "plain": item.get("plainLyrics", ""),
-                    }
-            if items and items[0].get("plainLyrics"):
-                return {"synced": False, "lyrics": "", "plain": items[0]["plainLyrics"]}
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            r = await client.get(
+                "https://lrclib.net/api/search",
+                params={"track_name": title, "artist_name": artist},
+                headers={"User-Agent": "VelvetLocalPlayer/1.0"},
+            )
+            if r.status_code == 200:
+                items = r.json()
+                for item in items:
+                    if item.get("syncedLyrics"):
+                        return {
+                            "synced": True,
+                            "lyrics": item["syncedLyrics"],
+                            "plain": item.get("plainLyrics", ""),
+                        }
+                if items and items[0].get("plainLyrics"):
+                    return {"synced": False, "lyrics": "", "plain": items[0]["plainLyrics"]}
+    except Exception:
+        pass
     return {"synced": False, "lyrics": "", "plain": ""}
 
 
@@ -371,7 +389,14 @@ async def get_home(lang: str = Query("English")):
     hero_q, shelf1_q, shelf2_q = queries.get(lang, queries["English"])
 
     async def quick_ytm(q: str, limit: int = 10):
-        res = await asyncio.to_thread(ytm.search, q, filter="songs", limit=limit)
+        def _search():
+            for _ in range(2):
+                try:
+                    return type(ytm)().search(q, filter="songs", limit=limit)
+                except Exception:
+                    continue
+            return []
+        res = await asyncio.to_thread(_search)
         out = []
         for item in (res or [])[:limit]:
             vid = item.get("videoId")
