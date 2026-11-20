@@ -1,4 +1,4 @@
-const state = {
+﻿const state = {
   lang: "English",
   queue: [],
   currentIndex: -1,
@@ -60,7 +60,7 @@ function renderPresets() {
     grid.appendChild(card);
   });
 }
-function applyGradientCSS(css) { document.documentElement.style.setProperty("--fs-bg", css); }
+function applyGradientCSS(css) { document.documentElement.style.setProperty("--fs-bg", css); if (typeof syncPipTheme === "function") syncPipTheme(css); }
 function applyDynamicHue(seedText, thumbUrl = "") {
   const fallback = () => {
     let hash = 0;
@@ -381,6 +381,7 @@ async function playTrack(track) {
   updateFavIcon();
   updateMediaSession(track);
   loadLyrics(track);
+  if (typeof syncPipTrack === "function") syncPipTrack();
   fetch("/api/history", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(track) });
 }
 
@@ -476,6 +477,7 @@ async function loadLyrics(track) {
       container.innerHTML = data.plain.split("\n").map(l => `<p class="lyric-line active" style="opacity:0.85;font-size:1.5rem">${l}</p>`).join("");
     } else container.innerHTML = `<p class="lyric-line active">No lyrics found for this track.</p>`;
   } catch { container.innerHTML = `<p class="lyric-line active">Could not load lyrics.</p>`; }
+  if (typeof syncPipLyrics === "function") syncPipLyrics();
 }
 function updateActiveLyric(t) {
   if (!state.lyrics.length) return;
@@ -696,6 +698,7 @@ window.addEventListener("keydown", (e) => {
   else if (k === "m") { audio.muted = !audio.muted; }
   else if (k === "r") { cycleRepeat(); }
   else if (k === "s") { toggleShuffle(); }
+  else if (k === "p") { togglePiP(); }
 });
 
 // Init
@@ -981,5 +984,185 @@ document.getElementById("scanLocalBtn")?.addEventListener("click", async () => {
   } catch (err) {
     btn.textContent = "Scan Folder";
     alert("Scan error: " + err.message);
+  }
+});
+
+// --- PART 4: DOCUMENT PICTURE-IN-PICTURE MINI PLAYER ---
+let pipWindow = null;
+let pipMode = "art";
+let pipLastLyricIdx = -1;
+
+const PIP_ICONS = {
+  play: `<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20 6 4"/></svg>`,
+  pause: `<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`,
+  prev: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5"/></svg>`,
+  next: `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg>`,
+  lyrics: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="21" y1="6" x2="3" y2="6"/><line x1="15" y1="12" x2="3" y2="12"/><line x1="17" y1="18" x2="3" y2="18"/></svg>`,
+  art: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>`,
+  heart: `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>`,
+};
+
+async function togglePiP() {
+  if (!("documentPictureInPicture" in window)) {
+    alert("Mini Player (Document PiP) requires Edge, Chrome, or Brave.");
+    return;
+  }
+  if (pipWindow && !pipWindow.closed) { pipWindow.close(); return; }
+
+  pipWindow = await window.documentPictureInPicture.requestWindow({ width: 310, height: 420 });
+  document.getElementById("pipBtn")?.classList.add("active");
+
+  const doc = pipWindow.document;
+  doc.title = "Velvet Mini";
+
+  const fontLink = doc.createElement("link");
+  fontLink.rel = "stylesheet";
+  fontLink.href = "https://fonts.googleapis.com/css2?family=Noto+Sans+Devanagari:wght@400;600;700&family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap";
+  doc.head.appendChild(fontLink);
+
+  const style = doc.createElement("style");
+  style.textContent = `
+    * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+    body {
+      height: 100vh; overflow: hidden; color: #fff;
+      font-family: 'Plus Jakarta Sans', 'Noto Sans Devanagari', sans-serif;
+      background: var(--fs-bg, radial-gradient(circle at 25% 25%, #3d161b 0%, #12080a 55%, #050505 100%));
+      display: flex; flex-direction: column; padding: 16px; transition: background 0.5s ease;
+    }
+    .hidden { display: none !important; }
+    .pip-art-view { flex: 1; display: flex; flex-direction: column; justify-content: space-between; gap: 12px; min-height: 0; }
+    .art-wrap { width: 100%; aspect-ratio: 1; max-height: 225px; margin: 0 auto; border-radius: 14px; overflow: hidden; background: rgba(255,255,255,0.06); box-shadow: 0 16px 36px rgba(0,0,0,0.6); }
+    .art-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .meta { text-align: center; min-width: 0; }
+    .title { font-size: 0.98rem; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .artist { font-size: 0.78rem; color: rgba(255,255,255,0.68); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .pip-lyrics-view { flex: 1; display: flex; flex-direction: column; min-height: 0; gap: 10px; }
+    .lyrics-header { display: flex; align-items: center; gap: 10px; padding-bottom: 8px; border-bottom: 1px solid rgba(255,255,255,0.1); }
+    .lyrics-header img { width: 34px; height: 34px; border-radius: 6px; object-fit: cover; }
+    .lyrics-header .meta { text-align: left; flex: 1; }
+    .lyrics-scroll { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding: 28% 4px; scrollbar-width: none; }
+    .lyrics-scroll::-webkit-scrollbar { display: none; }
+    .p-lyric { font-size: 1.05rem; font-weight: 700; line-height: 1.4; color: rgba(255,255,255,0.3); cursor: pointer; transition: color 0.2s, transform 0.2s; transform-origin: left center; }
+    .p-lyric:hover { color: rgba(255,255,255,0.65); }
+    .p-lyric.active { color: #fff; transform: scale(1.03); }
+    .scrubber { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+    .bar { height: 4px; background: rgba(255,255,255,0.2); border-radius: 99px; cursor: pointer; overflow: hidden; }
+    .fill { height: 100%; width: 0%; background: #fff; border-radius: 99px; }
+    .times { display: flex; justify-content: space-between; font-size: 0.68rem; color: rgba(255,255,255,0.6); font-variant-numeric: tabular-nums; }
+    .controls { display: flex; align-items: center; justify-content: space-between; padding: 6px 4px 0; }
+    .btn { background: transparent; border: none; color: rgba(255,255,255,0.8); cursor: pointer; width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center; justify-content: center; transition: 0.15s; }
+    .btn:hover { color: #fff; background: rgba(255,255,255,0.1); }
+    .btn.active { color: #ff5722; }
+    .btn.mode-on { color: #4ade80; background: rgba(74,222,128,0.12); }
+    .play-btn { width: 42px; height: 42px; border-radius: 50%; background: #fff; color: #000; border: none; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+    .play-btn:hover { transform: scale(1.05); }
+  `;
+  doc.head.appendChild(style);
+
+  doc.body.innerHTML = `
+    <div id="pipArtView" class="pip-art-view">
+      <div class="art-wrap"><img id="pipArt" src="" alt="" /></div>
+      <div class="meta">
+        <div id="pipTitle" class="title">No track playing</div>
+        <div id="pipArtist" class="artist">Velvet</div>
+      </div>
+    </div>
+    <div id="pipLyricsView" class="pip-lyrics-view hidden">
+      <div class="lyrics-header">
+        <img id="pipMiniArt" src="" alt="" />
+        <div class="meta">
+          <div id="pipMiniTitle" class="title">No track playing</div>
+          <div id="pipMiniArtist" class="artist">Velvet</div>
+        </div>
+      </div>
+      <div id="pipLyricsBox" class="lyrics-scroll"></div>
+    </div>
+    <div class="scrubber">
+      <div id="pipBar" class="bar"><div id="pipFill" class="fill"></div></div>
+      <div class="times"><span id="pipCur">0:00</span><span id="pipDur">0:00</span></div>
+    </div>
+    <div class="controls">
+      <button id="pipFav" class="btn" title="Like">${PIP_ICONS.heart}</button>
+      <button id="pipPrev" class="btn" title="Previous">${PIP_ICONS.prev}</button>
+      <button id="pipPlay" class="play-btn" title="Play/Pause">${PIP_ICONS.play}</button>
+      <button id="pipNext" class="btn" title="Next">${PIP_ICONS.next}</button>
+      <button id="pipModeBtn" class="btn" title="Toggle Lyrics">${PIP_ICONS.lyrics}</button>
+    </div>
+  `;
+
+  doc.getElementById("pipPlay").addEventListener("click", togglePlay);
+  doc.getElementById("pipPrev").addEventListener("click", prevTrack);
+  doc.getElementById("pipNext").addEventListener("click", nextTrack);
+  doc.getElementById("pipFav").addEventListener("click", async () => { await toggleFavorite(); syncPipFav(); });
+  doc.getElementById("pipModeBtn").addEventListener("click", () => { pipMode = pipMode === "art" ? "lyrics" : "art"; applyPipMode(); });
+  doc.getElementById("pipBar").addEventListener("click", (e) => {
+    if (!audio.duration) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    audio.currentTime = ((e.clientX - rect.left) / rect.width) * audio.duration;
+  });
+
+  pipWindow.addEventListener("pagehide", () => {
+    pipWindow = null;
+    document.getElementById("pipBtn")?.classList.remove("active");
+  });
+
+  syncPipTheme(getComputedStyle(document.documentElement).getPropertyValue("--fs-bg"));
+  syncPipTrack(); syncPipLyrics(); syncPipPlay(); syncPipFav(); applyPipMode();
+}
+
+function applyPipMode() {
+  if (!pipWindow || pipWindow.closed) return;
+  const doc = pipWindow.document, isLyrics = pipMode === "lyrics";
+  doc.getElementById("pipArtView").classList.toggle("hidden", isLyrics);
+  doc.getElementById("pipLyricsView").classList.toggle("hidden", !isLyrics);
+  const btn = doc.getElementById("pipModeBtn");
+  btn.innerHTML = isLyrics ? PIP_ICONS.art : PIP_ICONS.lyrics;
+  btn.classList.toggle("mode-on", isLyrics);
+}
+function syncPipTheme(css) { if (pipWindow && !pipWindow.closed) pipWindow.document.documentElement.style.setProperty("--fs-bg", css); }
+function syncPipTrack() {
+  if (!pipWindow || pipWindow.closed || !state.currentTrack) return;
+  const doc = pipWindow.document, t = state.currentTrack;
+  ["pipArt", "pipMiniArt"].forEach(id => doc.getElementById(id).src = t.thumbnail || "");
+  ["pipTitle", "pipMiniTitle"].forEach(id => doc.getElementById(id).textContent = t.title);
+  ["pipArtist", "pipMiniArtist"].forEach(id => doc.getElementById(id).textContent = t.artist);
+  syncPipFav();
+}
+function syncPipLyrics() {
+  if (!pipWindow || pipWindow.closed) return;
+  const box = pipWindow.document.getElementById("pipLyricsBox");
+  box.innerHTML = ""; pipLastLyricIdx = -1;
+  if (state.lyrics.length) {
+    state.lyrics.forEach(line => {
+      const p = pipWindow.document.createElement("p");
+      p.className = "p-lyric"; p.textContent = line.text;
+      p.addEventListener("click", () => { audio.currentTime = line.time; });
+      box.appendChild(p);
+    });
+  } else {
+    (document.getElementById("lyricsContainer")?.innerText || "No lyrics found.").split("\n").forEach(l => {
+      const p = pipWindow.document.createElement("p");
+      p.className = "p-lyric active"; p.style.fontSize = "0.92rem"; p.textContent = l;
+      box.appendChild(p);
+    });
+  }
+}
+function syncPipPlay() { if (pipWindow && !pipWindow.closed) pipWindow.document.getElementById("pipPlay").innerHTML = audio.paused ? PIP_ICONS.play : PIP_ICONS.pause; }
+function syncPipFav() { if (pipWindow && !pipWindow.closed) pipWindow.document.getElementById("pipFav").classList.toggle("active", !!(state.currentTrack && state.favorites.has(state.currentTrack.id))); }
+
+document.getElementById("pipBtn")?.addEventListener("click", togglePiP);
+audio.addEventListener("play", syncPipPlay);
+audio.addEventListener("pause", syncPipPlay);
+audio.addEventListener("timeupdate", () => {
+  if (!pipWindow || pipWindow.closed || !audio.duration) return;
+  const doc = pipWindow.document;
+  doc.getElementById("pipFill").style.width = `${(audio.currentTime / audio.duration) * 100}%`;
+  doc.getElementById("pipCur").textContent = fmt(audio.currentTime);
+  doc.getElementById("pipDur").textContent = fmt(audio.duration);
+  if (state.lyrics.length && state.activeLyricIdx !== pipLastLyricIdx) {
+    pipLastLyricIdx = state.activeLyricIdx;
+    const nodes = doc.querySelectorAll("#pipLyricsBox .p-lyric");
+    nodes.forEach((n, i) => n.classList.toggle("active", i === pipLastLyricIdx));
+    if (pipLastLyricIdx >= 0 && nodes[pipLastLyricIdx]) nodes[pipLastLyricIdx].scrollIntoView({ behavior: "smooth", block: "center" });
   }
 });
