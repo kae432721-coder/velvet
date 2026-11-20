@@ -168,6 +168,7 @@ async function loadHome(lang) {
     renderCardRow(div.querySelector(".card-row"), shelf.tracks);
     shelvesEl.appendChild(div);
   });
+  if (typeof loadMadeForYou === "function") loadMadeForYou();
   lucide.createIcons();
 }
 
@@ -363,6 +364,7 @@ async function playTrack(track) {
   initVisualizer();
   if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
   state.currentTrack = track;
+  if (typeof playedSessionIds !== "undefined") playedSessionIds.add(track.id);
   audio.src = `/api/stream/${encodeURIComponent(track.id)}?t=${Date.now()}`;
   audio.volume = state.crossfade > 0 ? 0.1 : state.userVolume;
   audio.play().catch(console.error);
@@ -418,9 +420,7 @@ function nextTrack() {
   } else if (state.repeat === "all") {
     state.currentIndex = 0;
     playTrack(state.queue[0]);
-  } else if (state.autoplay) {
-    fetchAutoplayNext();
-  }
+  } else { if (typeof showPlaylistEndPrompt === "function") showPlaylistEndPrompt(); }
 }
 function prevTrack() {
   if (audio.currentTime > 3) { audio.currentTime = 0; return; }
@@ -1166,3 +1166,136 @@ audio.addEventListener("timeupdate", () => {
     if (pipLastLyricIdx >= 0 && nodes[pipLastLyricIdx]) nodes[pipLastLyricIdx].scrollIntoView({ behavior: "smooth", block: "center" });
   }
 });
+// --- PART 5: MADE FOR YOU & END-OF-PLAYLIST PROMPT ---
+const playedSessionIds = new Set();
+const usedMixSeeds = new Set();
+
+function ensureEndPromptUI() {
+  if (document.getElementById("endPlaylistToast")) return;
+  const style = document.createElement("style");
+  style.textContent = `
+    .end-toast {
+      position: fixed; right: 24px; bottom: 92px; z-index: 90;
+      width: 320px; padding: 16px 18px; border-radius: 14px;
+      background: rgba(18, 18, 22, 0.96); backdrop-filter: blur(16px);
+      border: 1px solid rgba(255,255,255,0.14);
+      box-shadow: 0 20px 50px rgba(0,0,0,0.65);
+      display: flex; flex-direction: column; gap: 12px;
+      animation: toastIn 0.22s ease;
+    }
+    @keyframes toastIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+    .end-toast-head { display: flex; justify-content: space-between; align-items: center; }
+    .end-toast-title { font-weight: 700; font-size: 0.92rem; }
+    .end-toast-sub { font-size: 0.78rem; color: var(--muted); }
+    .end-toast-actions { display: flex; gap: 8px; }
+    .end-toast-actions button { flex: 1; justify-content: center; padding: 8px 12px; font-size: 0.8rem; }
+  `;
+  document.head.appendChild(style);
+
+  const toast = document.createElement("div");
+  toast.id = "endPlaylistToast";
+  toast.className = "end-toast hidden";
+  toast.innerHTML = `
+    <div class="end-toast-head">
+      <div class="end-toast-title">Playlist Finished</div>
+      <button id="dismissEndToast" class="icon-btn" style="padding:2px"><i data-lucide="x" style="width:16px;height:16px"></i></button>
+    </div>
+    <div class="end-toast-sub">Repeat this queue or jump into a fresh unplayed mix?</div>
+    <div class="end-toast-actions">
+      <button id="toastRepeatBtn" class="pill">Repeat</button>
+      <button id="toastNextPlBtn" class="pill active">Another Playlist</button>
+    </div>
+  `;
+  document.body.appendChild(toast);
+  lucide.createIcons();
+
+  document.getElementById("dismissEndToast").addEventListener("click", () => toast.classList.add("hidden"));
+  document.getElementById("toastRepeatBtn").addEventListener("click", () => {
+    toast.classList.add("hidden");
+    if (state.queue.length) { state.currentIndex = 0; playTrack(state.queue[0]); }
+  });
+  document.getElementById("toastNextPlBtn").addEventListener("click", async () => {
+    const btn = document.getElementById("toastNextPlBtn");
+    btn.textContent = "Loading...";
+    await playFreshPlaylist();
+    btn.textContent = "Another Playlist";
+    toast.classList.add("hidden");
+  });
+}
+
+function showPlaylistEndPrompt() {
+  ensureEndPromptUI();
+  document.getElementById("endPlaylistToast").classList.remove("hidden");
+}
+
+async function playFreshPlaylist() {
+  try {
+    const statsRes = await fetch("/api/stats");
+    const stats = await statsRes.json();
+    const candidates = (stats.top_artists || []).map(a => a.artist).filter(Boolean);
+    if (state.currentTrack?.artist) candidates.push(state.currentTrack.artist);
+    candidates.push(`${state.lang} top hits`, `${state.lang} chill vibes`, `${state.lang} trending`);
+
+    // Pick a seed we haven't used yet this session
+    let seed = candidates.find(c => !usedMixSeeds.has(c.toLowerCase()));
+    if (!seed) { usedMixSeeds.clear(); seed = candidates[0]; }
+    usedMixSeeds.add(seed.toLowerCase());
+
+    const res = await fetch(`/api/search?q=${encodeURIComponent(seed + " songs")}&source=ytm&limit=15`);
+    const data = await res.json();
+    const fresh = (data.results || []).filter(t => !playedSessionIds.has(t.id));
+
+    if (fresh.length) {
+      playFromList(fresh.sort(() => Math.random() - 0.5), 0);
+    } else if (data.results?.length) {
+      playFromList(data.results, 0);
+    }
+  } catch (e) { console.warn("Fresh playlist fetch failed:", e); }
+}
+
+async function loadMadeForYou() {
+  const shelvesEl = document.getElementById("dynamicShelves");
+  if (!shelvesEl) return;
+  document.getElementById("madeForYouShelf")?.remove();
+
+  try {
+    const [statsRes, favRes] = await Promise.all([fetch("/api/stats"), fetch("/api/favorites")]);
+    const stats = await statsRes.json();
+    const favs = await favRes.json();
+
+    const artists = [...new Set([
+      ...(stats.top_artists || []).map(a => a.artist),
+      ...(favs.favorites || []).map(f => f.artist)
+    ].filter(Boolean))].slice(0, 3);
+
+    if (!artists.length) return;
+
+    const queries = await Promise.all(
+      artists.map(a => fetch(`/api/search?q=${encodeURIComponent(a)}&source=ytm&limit=5`).then(r => r.json()).catch(() => ({ results: [] })))
+    );
+
+    const seen = new Set();
+    const mix = queries.flatMap(q => q.results || []).filter(t => {
+      if (!t.id || seen.has(t.id)) return false;
+      seen.add(t.id);
+      return true;
+    }).sort(() => Math.random() - 0.5).slice(0, 10);
+
+    if (!mix.length) return;
+
+    const shelf = document.createElement("div");
+    shelf.id = "madeForYouShelf";
+    shelf.className = "shelf";
+    shelf.innerHTML = `
+      <div class="shelf-header">
+        <h2>Made For You</h2>
+        <button id="playMadeForYouBtn" class="pill active" style="padding:5px 14px;font-size:0.78rem;">Play Mix</button>
+      </div>
+      <div class="card-row"></div>
+    `;
+    renderCardRow(shelf.querySelector(".card-row"), mix);
+    shelvesEl.prepend(shelf);
+    document.getElementById("playMadeForYouBtn").addEventListener("click", () => playFromList(mix, 0));
+    lucide.createIcons();
+  } catch (e) { console.warn("Made For You failed:", e); }
+}
