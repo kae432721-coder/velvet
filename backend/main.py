@@ -203,11 +203,11 @@ async def resolve_stream_url(track_id: str) -> str:
         vid = track_id.replace("ytm_", "", 1)
 
         def extract():
-            clients = [None, ["tv"], ["web_safari"], ["ios"], ["android_vr"]]
+            clients = [None, ["mweb"], ["android_vr"]]
             last_err = None
             for client in clients:
                 ydl_opts = {
-                    "format": "bestaudio[ext=m4a]/bestaudio/best",
+                    "format": "bestaudio/best",
                     "quiet": True,
                     "no_warnings": True,
                     "socket_timeout": 12,
